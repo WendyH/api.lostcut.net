@@ -404,6 +404,12 @@ function DecodeHDkinotatrVKlink($link, &$html) {
 ///////////////////////////////////////////////////////////////////////////////
 // Loading and parse web page - searching blocks with video
 function ScanPage($f3, $page=1, $last_id=0) {
+  if (!$last_id) {
+    $token = isset($_REQUEST['token']) ? $_REQUEST['token'] : "";
+    if ($token=="<secret_token>") ExitOk("Records ".(isset($_REQUEST['u']) ? "UPDATED" : "INSERTED")." successfully", 10); // for demo
+    if ($token!=$f3->get('update_token')) ErrorExit("Forbitten. Update token not match.");
+  }
+
   $page       = isset($_REQUEST['p']) ? (int)$_REQUEST['p'] : $page; // page number for loadings
   $sql_update = isset($_REQUEST['u']) ? (int)$_REQUEST['u'] : false; // use UPDATE vs INSERT
 
