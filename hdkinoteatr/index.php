@@ -22,12 +22,16 @@ $f3->set('conn_string' , 'mysql:host=localhost;port=3306;dbname=hdkinoteatr'); /
 
 $f3->set('cache_dir'         , 'cache');            // cache directory
 $f3->set('cache_max_size'    , 2000 * 1024 * 1024); // cache maximum size (in bytes)
-$f3->set('checking_interval' , 3600);               // intefval of checks site for updates (in secunds)
+$f3->set('checking_interval' , 3600);               // intefval of checks site for updates (in seconds)
 $f3->set('file_state'        , 'update.state');     // file with stored last_id and last_time data
 $f3->set('maximum_pages_load', 4);                  // maximum pages to load for searching last_id
+$f3->set('cache_short_life'   , 43200);             // cache lifetime of the serials playlist = 12 hours (in seconds)
+$f3->set('cache_episodes_life', 86400 * 2);         // cache lifetime by info about episodes of the show = 2 days (in seconds)
 
 $f3->set('engtitle_in_title', 0 ); // search english title in title pattern
 $f3->set('titles_separator', '/'); // separator in title for titles in other lang
+
+// --------------------- API ROUTE --------------------------------------------
 
 $f3->route('GET /', function() { require("api.html"); }); // API docs
 
@@ -229,7 +233,7 @@ function GetSeries($f3) {
   if (!$hash) ErrorExit("No serial hash");
 
   $cache_name = "serial_$hash";
-  //if (LoadCache($f3, $cache_name, true)) return;
+  if (LoadCache($f3, $cache_name, true)) return;
 
   $url  = "http://moonwalk.cc/$type/$hash/iframe";
   $html = LoadPage($url);
@@ -312,7 +316,7 @@ function LoadCache($f3, $table_name, $short_life=false) {
   $cache_dir  = $f3->get('cache_dir');
   $cache_file = "$cache_dir/$table_name";
   if (file_exists($cache_file)) {
-    if ($short_life && ((time()-filemtime($cache_file)) > 86400)) { // 1 day
+    if ($short_life && ((time()-filemtime($cache_file)) > $f3->get('cache_short_life'))) {
       return false;
     }
     echo file_get_contents($cache_file);
@@ -322,11 +326,11 @@ function LoadCache($f3, $table_name, $short_life=false) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-function LoadArrayCache($f3, $cache_name, &$result) {
+function LoadCacheSerialsInfo($f3, $cache_name, &$result) {
   $cache_dir  = $f3->get('cache_dir');
   $cache_file = "$cache_dir/$cache_name";
   if (file_exists($cache_file)) {
-    if ((time()-filemtime($cache_file)) > 86400 * 2) { // 2 days
+    if ((time()-filemtime($cache_file)) > $f3->get('cache_episodes_life')) {
       return false;
     }
     $json   = gzuncompress(file_get_contents($cache_file));
@@ -337,7 +341,7 @@ function LoadArrayCache($f3, $cache_name, &$result) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-function SaveArrayCache($f3, $cache_name, &$result) {
+function SaveCacheSerialsInfo($f3, $cache_name, &$result) {
   $cache_dir = $f3->get('cache_dir');
   $json = json_encode($result);
   file_put_contents("$cache_dir/$cache_name", gzcompress($json));
@@ -406,7 +410,7 @@ function DecodeHDkinotatrVKlink($link, &$html) {
 function ScanPage($f3, $page=1, $last_id=0) {
   if (!$last_id) {
     $token = isset($_REQUEST['token']) ? $_REQUEST['token'] : "";
-    if ($token=="<secret_token>") ExitOk("Records ".(isset($_REQUEST['u']) ? "UPDATED" : "INSERTED")." successfully", 10); // for demo
+    if ($token=="<secret_token>") ExitOk("Records ".(isset($_REQUEST['u']) ? "UPDATED" : "INSERTED")." successfully", 10);
     if ($token!=$f3->get('update_token')) ErrorExit("Forbitten. Update token not match.");
   }
 
@@ -865,7 +869,7 @@ function InitDB($f3) {
 function GetSeriesInfoByKinopoiskID($f3, $kpid) {
   $info = array();
   $cache_name = "kp$kpid";
-  //if (LoadArrayCache($f3, $cache_name, $info)) return $info;
+  if (LoadCacheSerialsInfo($f3, $cache_name, $info)) return $info;
 
   $data = LoadPage("https://www.kinopoisk.ru/film/$kpid/episodes/");
   $data = mb_convert_encoding($data, "utf-8", "windows-1251");
@@ -883,7 +887,7 @@ function GetSeriesInfoByKinopoiskID($f3, $kpid) {
       $episode++;
     }
   }
-  if (count($info)>0) SaveArrayCache($f3, $cache_name, $info);
+  if (count($info)>0) SaveCacheSerialsInfo($f3, $cache_name, $info);
   return $info;
 }
 
