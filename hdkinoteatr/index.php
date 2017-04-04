@@ -95,6 +95,7 @@ function GetVideos($f3) {
   $start     = isset($_REQUEST['start'   ]) ? $_REQUEST['start'   ] : 0;   // start position of the selection
   $limit     = isset($_REQUEST['limit'   ]) ? $_REQUEST['limit'   ] : 100; // maximum items in the selection
   $id        = isset($_REQUEST['id'      ]) ? $_REQUEST['id'      ] : 0;   // video id
+  $kpid      = isset($_REQUEST['kpid'    ]) ? $_REQUEST['kpid'    ] : 0;   // kinopoisk id
   $q         = isset($_REQUEST['q'       ]) ? $_REQUEST['q'       ] : "";  // query for searching videos (by name)
   $category  = isset($_REQUEST['category']) ? $_REQUEST['category'] : 0;   // id of the category
   $country   = isset($_REQUEST['country' ]) ? $_REQUEST['country' ] : 0;   // id of the country
@@ -105,12 +106,20 @@ function GetVideos($f3) {
   $rating_im = isset($_REQUEST['min_imdb']) ? $_REQUEST['min_imdb'] : 0;   // minimum rating
   $rating_kp = isset($_REQUEST['min_kp'  ]) ? $_REQUEST['min_kp'  ] : 0;   // minimum rating
   $rating_hd = isset($_REQUEST['min_hd'  ]) ? $_REQUEST['min_hd'  ] : 0;   // minimum rating
-
+  $director  = isset($_REQUEST['director']) ? $_REQUEST['director'] : "";  // query for director search
+  $actor     = isset($_REQUEST['actor'   ]) ? $_REQUEST['actor'   ] : "";  // query for actors search
+  $scenarist = isset($_REQUEST['scenarist'])? $_REQUEST['scenarist']: "";  // query for scenarists search
+  $producer  = isset($_REQUEST['producer']) ? $_REQUEST['producer'] : "";  // query for producers search
+  $composer  = isset($_REQUEST['composer']) ? $_REQUEST['composer'] : "";  // query for composers search
+  $translation = isset($_REQUEST['translation']) ? $_REQUEST['translation'] : "";  // query for translations search
+  $human_read  = isset($_REQUEST['hr'         ]) ? $_REQUEST['hr'         ] : 0;   // formatting output
+  
   if ($q && strlen($q) < MINIMUM_QUERY_LENGHT) ErrorExit("Too short query");
 
   $start     = (int)abs($start);
   $limit     = (int)abs($limit);
   $id        = (int)abs($id);
+  $kpid      = (int)abs($kpid);
   $category  = (int)abs($category);
   $country   = (int)abs($country);
   $year      = (int)abs($year);
@@ -118,6 +127,7 @@ function GetVideos($f3) {
   $rating_im = (float)abs($rating_im);
   $rating_kp = (float)abs($rating_kp);
   $rating_hd = (float)abs($rating_hd);
+  $human_read= (int)abs($human_read);
 
   if ($ord) {
     $direction = ($ord[0]=='-') ? "DESC" : "";
@@ -144,7 +154,14 @@ function GetVideos($f3) {
   if ($rating_im) { $params[':rating_im']=$rating_im; $where[]="rating_imdb>=:rating_im"; }
   if ($rating_kp) { $params[':rating_kp']=$rating_kp; $where[]="rating_kp>=:rating_kp"; }
   if ($rating_hd) { $params[':rating_hd']=$rating_hd; $where[]="rating_hd>=:rating_hd"; }
-  
+
+  if ($director )  { $params[':director'   ]="%$director%"   ; $where[]="v.director LIKE :director"; }
+  if ($actor    )  { $params[':actor'      ]="%$actor%"      ; $where[]="v.actors   LIKE :actor"   ; }
+  if ($scenarist)  { $params[':scenarist'  ]="%$scenarist%"  ; $where[]="v.scenarist LIKE :scenarist"; }
+  if ($producer )  { $params[':producer'   ]="%$producer%"   ; $where[]="v.producer LIKE :producer"; }
+  if ($composer )  { $params[':composer'   ]="%$composer%"   ; $where[]="v.composer LIKE :composer"; }
+  if ($translation){ $params[':translation']="%$translation%"; $where[]="v.translation LIKE :translation"; }
+
   if ($top) {
     switch ($top) {
       case 'imdb': $order[]="rating_imdb DESC, rating_imdb_votes DESC"; $where[]="isserial=0"; $limit=250; break;
@@ -155,6 +172,7 @@ function GetVideos($f3) {
   }
 
   if     ($id    ) { $params[':id'  ]=$id        ; $where[]="v.id=:id"; }
+  elseif ($kpid  ) { $params[':kpid']=$kpid      ; $where[]="v.kpid=:kpid"; }
   elseif ($letter) { $params[':name']=$letter."%"; $where[]="v.name LIKE :name"; }
   elseif ($q     ) { $params[':name']="%$q%"     ; $where[]="v.name LIKE :name OR v.name_eng LIKE :name"; }
 
@@ -166,7 +184,12 @@ function GetVideos($f3) {
   if (!strpos($sql, 'LIMIT' )) $sql .= " LIMIT $start,$limit";
 
   $result = $db->exec($sql, $params);
-  $data   = json_encode($result, JSON_NUMERIC_CHECK);
+
+  if ($human_read)
+    $data = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
+  else
+    $data = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+
   SaveCache($f3, $cache_name, $data);
   echo $data;
 }
@@ -212,7 +235,7 @@ function ListTable($f3, $table_name) {
 
   if (count($order)>0) $sql .= " ORDER BY ".implode(', ', $order);
 
-  $data = json_encode($db->exec($sql), JSON_NUMERIC_CHECK);
+  $data = json_encode($db->exec($sql), JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
   if ($data) SaveCache($f3, $cache_name, $data);
   echo $data;
 }
@@ -281,7 +304,7 @@ function GetSeries($f3) {
       }
     }
   }
-  $data = json_encode($result, JSON_NUMERIC_CHECK);
+  $data = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
   SaveCache($f3, $cache_name, $data);
   echo $data;
 }
@@ -304,7 +327,12 @@ function FindSelectItems($html, $url, $select, $season=0) {
       if ($select=='season'    ) $link = "$url?season=$value";
       if ($select=='episode'   ) $link = "$url?season=$season&episode=$value";
       if ($select=='translator') $link = "$url";
-      if (preg_match('#Серия\s+(\d+)#i', $name, $m)) $name = str_replace($m[0], sprintf("$frmt серия", $m[1]), $name);
+
+      if (preg_match('#Серия\s+(\d+)#i', $name, $m)) {
+        $episode = $m[1];
+        $name = str_replace($m[0], sprintf("$frmt серия", $episode), $name);
+      }
+
       $items[] = ["comment"=>$name, "file"=>$link];
     }
   }
@@ -319,7 +347,7 @@ function LoadCache($f3, $table_name, $short_life=false) {
     if ($short_life && ((time()-filemtime($cache_file)) > $f3->get('cache_short_life'))) {
       return false;
     }
-    echo file_get_contents($cache_file);
+    echo gzuncompress(file_get_contents($cache_file));
     return true;
   }
   return false;
@@ -343,7 +371,7 @@ function LoadCacheSerialsInfo($f3, $cache_name, &$result) {
 ///////////////////////////////////////////////////////////////////////////////
 function SaveCacheSerialsInfo($f3, $cache_name, &$result) {
   $cache_dir = $f3->get('cache_dir');
-  $json = json_encode($result);
+  $json = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
   file_put_contents("$cache_dir/$cache_name", gzcompress($json));
 }
 
@@ -351,7 +379,7 @@ function SaveCacheSerialsInfo($f3, $cache_name, &$result) {
 function SaveCache($f3, $table_name, &$data) {
   CheckCacheSizeLimit($f3);
   $cache_dir = $f3->get('cache_dir');
-  file_put_contents("$cache_dir/$table_name", $data);
+  file_put_contents("$cache_dir/$table_name", gzcompress($data));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -500,7 +528,7 @@ function ScanPage($f3, $page=1, $last_id=0) {
     $params['kpid'] = (int)$params['kpid'];
     $params['time'] = (int)$params['time'];
 
-    if ($last_id && ($params['id'] <= $last_id)) continue; // Skip all videos with ID less $last_id
+    if ($last_id && ($params['id'] <= $last_id)) continue; // Skip all videos with ID less or equal $last_id
     
     $params['rating_hd'        ] = (float)$params['rating_hd'];
     $params['rating_kp'        ] = (float)$params['rating_kp'];
@@ -508,7 +536,7 @@ function ScanPage($f3, $page=1, $last_id=0) {
     $params['rating_hd_votes'  ] = (int)$params['rating_hd_votes'];
     $params['rating_kp_votes'  ] = (int)$params['rating_kp_votes'];
     $params['rating_imdb_votes'] = (int)$params['rating_imdb_votes'];
-    $params['isserial'] = (int)$params['isserial'];
+    $params['isserial'         ] = (int)$params['isserial'];
 
     // hdkinoteatr parsing -----------------------------------
     $translates_count = substr_count($params['link'], '"file":');
@@ -679,7 +707,7 @@ function ExitWithJson($status, $msg, $updated=0) {
   $data['status' ] = $status;
   $data['message'] = $msg;
   $data['count'  ] = $updated;
-  die(json_encode($data));
+  die(json_encode($data, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
