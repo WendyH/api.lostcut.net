@@ -20,13 +20,13 @@ $f3->set('db_username' , '<user>');                     // database username
 $f3->set('db_password' , '<pass>');                     // database password
 $f3->set('conn_string' , 'mysql:host=localhost;port=3306;dbname=hdkinoteatr'); // connection string
 
-$f3->set('cache_dir'         , 'cache');            // cache directory
-$f3->set('cache_max_size'    , 2000 * 1024 * 1024); // cache maximum size (in bytes)
-$f3->set('checking_interval' , 3600);               // intefval of checks site for updates (in seconds)
-$f3->set('file_state'        , 'update.state');     // file with stored last_id and last_time data
-$f3->set('maximum_pages_load', 4);                  // maximum pages to load for searching last_id
-$f3->set('cache_short_life'   , 43200);             // cache lifetime of the serials playlist = 12 hours (in seconds)
-$f3->set('cache_episodes_life', 86400 * 2);         // cache lifetime by info about episodes of the show = 2 days (in seconds)
+$f3->set('cache_dir'          , 'cache');            // cache directory
+$f3->set('cache_max_size'     , 2000 * 1024 * 1024); // cache maximum size (in bytes)
+$f3->set('checking_interval'  , 3600 * 2);           // intefval of checks site for updates (in seconds)
+$f3->set('file_state'         , 'update.state');     // file with stored last_id and last_time data
+$f3->set('maximum_pages_load' , 4);                  // maximum pages to load for searching last_id
+$f3->set('cache_short_life'   , 43200);              // cache lifetime of the serials playlist = 12 hours (in seconds)
+$f3->set('cache_episodes_life', 86400 * 2);          // cache lifetime by info about episodes of the show = 2 days (in seconds)
 
 $f3->set('engtitle_in_title', 0 ); // search english title in title pattern
 $f3->set('titles_separator', '/'); // separator in title for titles in other lang
@@ -48,6 +48,154 @@ $f3->route('GET /initdb'    , function($f3) { InitDB   ($f3); }); // Create tabl
 $f3->run();
 
 exit;
+
+///////////////////////////////////////////////////////////////////////////////
+// Loading and parse web page - searching blocks with video
+function ScanPage($f3, $page=1, $last_id=0) {
+  if (!$last_id) {
+    $token = isset($_REQUEST['token']) ? $_REQUEST['token'] : "";
+    if ($token=="<secret_token>") ExitOk("Records ".(isset($_REQUEST['u']) ? "UPDATED" : "INSERTED")." successfully", 10);
+    if ($token!=$f3->get('update_token')) ErrorExit("Forbitten. Update token not match.");
+  }
+
+  $page       = isset($_REQUEST['p']) ? (int)$_REQUEST['p'] : $page; // page number for loadings
+  $sql_update = isset($_REQUEST['u']) ? (int)$_REQUEST['u'] : false; // use UPDATE vs INSERT
+
+  $db = new DB\SQL($f3->get('conn_string'), $f3->get('db_username'), $f3->get('db_password'));
+
+  $videos_columns = GetColumnsSizeTable($db, 'videos'); // for checks value size before inserting
+  
+  $html = LoadPage("http://www.hdkinoteatr.com/page/$page/");
+
+  // ****************************************
+  // Patterns for regex search and parsing (if no groups in pattern, return value as boolean)
+  $pattern_block = '#shortstory.*?argcat.*?</div>#s';
+
+  $patterns_in_block = array();   // pattern as string OR [pattern OR patterns, FINDMODE_(optional)]
+  $patterns_in_block['page'      ] = '#<a[^>]+href=["\'](.*?\.html)["\']#';
+  $patterns_in_block['image'     ] = '#<img[^>]+src=["\'](.*?)["\']#';
+
+  $patterns_in_link = array();
+  $patterns_in_link['id'         ] = '#/(\d+)[^/]+html#';
+  $patterns_in_link['isserial'   ] = '#/series/#'; // if no groups, check it as boolean
+
+  $patterns_in_page = array();
+  $patterns_in_page['name'       ] = [['#t1:"(.*?[^\\\\])"#', '#"og:title"[^>]+content="(.*?)"#'], FINDMODE_UNESCAPE];
+  $patterns_in_page['name_eng'   ] = ['#t2:"(.*?[^\\\\])"#', FINDMODE_UNESCAPE];
+  $patterns_in_page['link'       ] = [['#var\s*vkArr\s*=\s*\'(.*?)\';#', '#var\s*vkArr\s*=\s*(.*?);#', "#flashvars[^>]+file=(/uploads/[^'\"]+)#", "#<embed[^>]+src=['\"](.*?)['\"]#"], 0];
+  $patterns_in_page['year'       ] = '#lbl">Год:.*?(\d{4})#';
+  $patterns_in_page['kpid'       ] = '#id2:(\d+)#';
+  $patterns_in_page['country'    ] = '#(<a[^>]+/country/.*?)</div>#s';
+  $patterns_in_page['category'   ] = ['#argcat".*?(<a.*?)</div>#s'           , FINDMODE_COMMALINKS];
+  $patterns_in_page['director'   ] = ['#lbl">Режиссёр:</span>(.*?)</div>#s'  , FINDMODE_COMMALINKS];
+  $patterns_in_page['actors'     ] = ['#lbl">В ролях:</span>(.*?)</div>#s'   , FINDMODE_COMMALINKS];
+  $patterns_in_page['scenarist'  ] = ['#lbl">Сценарий:</span>(.*?)</div>#s'  , FINDMODE_COMMALINKS];
+  $patterns_in_page['producer'   ] = ['#lbl">Продюсер:</span>(.*?)</div>#s'  , FINDMODE_COMMALINKS];
+  $patterns_in_page['composer'   ] = ['#lbl">Композитор:</span>(.*?)</div>#s', FINDMODE_COMMALINKS];
+  $patterns_in_page['tags'       ] = ['#<i>Теги:(.*?)</div>#s'               , FINDMODE_COMMALINKS];
+  $patterns_in_page['premiere'   ] = '#lbl">Премьера \(мир\):(.*?)</div>#s';
+  $patterns_in_page['premiere_rf'] = '#lbl">Премьера \(РФ\):(.*?)</div>#s';
+  $patterns_in_page['budget'     ] = '#lbl">Бюджет:</span>(.*?)</div>#s';
+  $patterns_in_page['time'       ] = ['#lbl">Время:</span>(.*?)</div>#s', FINDMODE_TIME];
+  $patterns_in_page['translation'] = '#lbl">Перевод:</span>(.*?)</div>#s';
+  $patterns_in_page['rating_hd'        ] = '#our-rating.*?>(.*?)<#';
+  $patterns_in_page['rating_hd_votes'  ] = '#rating-num.*?>\((\d+.*?)[<\)]#';
+  $patterns_in_page['rating_kp'        ] = '#kp_rating.*?>(.*?)<#s';
+  $patterns_in_page['rating_kp_votes'  ] = '#kp_num[^>]+>(\d+.*?)<#s';
+  $patterns_in_page['rating_imdb'      ] = '#imdb_rating.*?>(.*?)<#s';
+  $patterns_in_page['rating_imdb_votes'] = '#imdb_num[^>]+>(\d+.*?)<#s';
+  $patterns_in_page['date'       ] = '#/(\d{4}/\d{2}/\d{2})/#';
+  $patterns_in_page['descr'      ] = '#(<div[^>]+class="[^"]*descr.*?</div>)#s';
+
+  $pattern_skip_if_no_link = '#id="reason"#'; // skip deleted videos
+  // ****************************************
+
+  // searching blocks in the loaded html
+  if (!preg_match_all($pattern_block, $html, $matches))
+    ErrorExit('Pattern for search are blocks nothing found.', true);
+
+  // ================= MAIN LOOP FOR SCANNING PAGE =================
+  $upd_count = 0;
+  foreach ($matches[0] as $block) {
+    $params = array();
+
+    // searching field values in the block
+    foreach ($patterns_in_block as $key => $p) $params[$key] = FindField($p, $block);
+
+    if (!$params['page']) ErrorExit('Regex pattern for search are `page` in blocks nothing found. Need update the php script.', true);
+
+    $page_url = FullLink($params['page'], $f3->get('url_base'));
+    $page = LoadPage($page_url);
+
+    // searching field values in the url
+    foreach ($patterns_in_link as $key => $p) $params[$key] = FindField($p, $page_url);
+    // searching field values in the loaded page
+    foreach ($patterns_in_page as $key => $p) $params[$key] = FindField($p, $page);
+
+    if (!$params['link'])  {
+      if (preg_match($pattern_skip_if_no_link, $page, $m)) continue;
+      ErrorExit('Regex pattern for search are `link` in blocks nothing found. Need update the php script. '.$page_url, true);
+    }
+    if (!$params['id'  ]) ErrorExit('Regex pattern for search are `id` nothing found. Need update the php script. '  .$page_url, true);
+    if (!$params['name']) ErrorExit('Regex pattern for search are `name` nothing found. Need update the php script. '.$page_url, true);
+
+    $params['id'  ] = (int)$params['id'  ];
+    $params['year'] = (int)$params['year'];
+    $params['kpid'] = (int)$params['kpid'];
+    $params['time'] = (int)$params['time'];
+
+    if ($last_id && ($params['id'] <= $last_id)) continue; // Skip all videos with ID less or equal $last_id
+    
+    $params['rating_hd'        ] = (float)$params['rating_hd'];
+    $params['rating_kp'        ] = (float)$params['rating_kp'];
+    $params['rating_imdb'      ] = (float)$params['rating_imdb'];
+    $params['rating_hd_votes'  ] = (int)$params['rating_hd_votes'];
+    $params['rating_kp_votes'  ] = (int)$params['rating_kp_votes'];
+    $params['rating_imdb_votes'] = (int)$params['rating_imdb_votes'];
+    $params['isserial'         ] = (int)$params['isserial'];
+
+    // hdkinoteatr parsing -----------------------------------
+    $translates_count = substr_count($params['link'], '"file":');
+    if ($translates_count==1) {
+      if (!$params['translation']) 
+        $params['translation'] = RegexValue('#"comment":\s*"(.*?)"#', $params['link']);
+      $params['link'] = RegexValue('#"file":\s*"(.*?)"#', $params['link']);
+    }
+
+    if (preg_match_all('#oid=[\w-]+&id=[\w-]+&hash=\w+#', $params['link'], $matches)) {
+      foreach ($matches[0] as $m) {
+        $params['link'] = str_replace($m, DecodeHDkinotatrVKlink($m, $page), $params['link']);
+      }
+    }
+    // --------------------------------------------------------
+
+    // Remove years from title
+    if (preg_match('#\([\d-]{4,}\)#', $params['name'], $m))
+      $params['name'] = trim(str_replace($m[0], '', $params['name']));
+
+    if ($f3->get('engtitle_in_title')) {
+      // Separate names
+      $names = explode($f3->get('titles_separator'), $name);
+      if (count($names) > 1) {
+        $params['name'    ] = Trim($names[0]);
+        $params['name_eng'] = Trim($names[1]);
+      }
+    }
+
+    $upd_count += InsertVideo($f3, $db, (int)$params['id'], $params, $videos_columns, $sql_update);
+  }
+  // ===================== END OF SCANNING PAGE ====================
+
+  if ($upd_count) {
+    if ($last_id) $f3->set('clear_cache_videos', true);
+    else          ClearTableCache($f3, 'videos');
+  }
+
+  if ($last_id) 
+    return $upd_count;
+
+  ExitOk("Records ".($sql_update ? "UPDATED" : "INSERTED")." successfully", $upd_count);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 function CheckUpdates($f3) {
@@ -205,7 +353,8 @@ function ListTable($f3, $table_name) {
   $db  = new DB\SQL($f3->get('conn_string'), $f3->get('db_username'), $f3->get('db_password'));
   $sql = "SELECT * FROM $table_name";
 
-  $ord = isset($_REQUEST['ord']) ? $_REQUEST['ord'] : "";  // order by field
+  $ord         = isset($_REQUEST['ord']) ? $_REQUEST['ord'] : "";  // order by field
+  $human_read  = isset($_REQUEST['hr' ]) ? $_REQUEST['hr' ] : 0;   // formatting output
 
   if ($ord) {
     $direction = ($ord[0]=='-') ? "DESC" : "";
@@ -235,7 +384,13 @@ function ListTable($f3, $table_name) {
 
   if (count($order)>0) $sql .= " ORDER BY ".implode(', ', $order);
 
-  $data = json_encode($db->exec($sql), JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+  $result = $db->exec($sql);
+
+  if ($human_read)
+    $data = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT);
+  else
+    $data = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+
   if ($data) SaveCache($f3, $cache_name, $data);
   echo $data;
 }
@@ -434,154 +589,6 @@ function DecodeHDkinotatrVKlink($link, &$html) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Loading and parse web page - searching blocks with video
-function ScanPage($f3, $page=1, $last_id=0) {
-  if (!$last_id) {
-    $token = isset($_REQUEST['token']) ? $_REQUEST['token'] : "";
-    if ($token=="<secret_token>") ExitOk("Records ".(isset($_REQUEST['u']) ? "UPDATED" : "INSERTED")." successfully", 10);
-    if ($token!=$f3->get('update_token')) ErrorExit("Forbitten. Update token not match.");
-  }
-
-  $page       = isset($_REQUEST['p']) ? (int)$_REQUEST['p'] : $page; // page number for loadings
-  $sql_update = isset($_REQUEST['u']) ? (int)$_REQUEST['u'] : false; // use UPDATE vs INSERT
-
-  $db = new DB\SQL($f3->get('conn_string'), $f3->get('db_username'), $f3->get('db_password'));
-
-  $videos_columns = GetColumnsSizeTable($db, 'videos'); // for checks value size before inserting
-  
-  $html = LoadPage("http://www.hdkinoteatr.com/page/$page/");
-
-  // ****************************************
-  // Patterns for regex search and parsing (if no groups in pattern, return value as boolean)
-  $pattern_block = '#shortstory.*?argcat.*?</div>#s';
-
-  $patterns_in_block = array();   // pattern as string OR [pattern OR patterns, FINDMODE_(optional)]
-  $patterns_in_block['page'      ] = '#<a[^>]+href=["\'](.*?\.html)["\']#';
-  $patterns_in_block['image'     ] = '#<img[^>]+src=["\'](.*?)["\']#';
-
-  $patterns_in_link = array();
-  $patterns_in_link['id'         ] = '#/(\d+)[^/]+html#';
-  $patterns_in_link['isserial'   ] = '#/series/#'; // if no groups, check it as boolean
-
-  $patterns_in_page = array();
-  $patterns_in_page['name'       ] = [['#t1:"(.*?[^\\\\])"#', '#"og:title"[^>]+content="(.*?)"#'], FINDMODE_UNESCAPE];
-  $patterns_in_page['name_eng'   ] = ['#t2:"(.*?[^\\\\])"#', FINDMODE_UNESCAPE];
-  $patterns_in_page['link'       ] = [['#var\s*vkArr\s*=\s*\'(.*?)\';#', '#var\s*vkArr\s*=\s*(.*?);#', "#flashvars[^>]+file=(/uploads/[^'\"]+)#", "#<embed[^>]+src=['\"](.*?)['\"]#"], 0];
-  $patterns_in_page['year'       ] = '#lbl">Год:.*?(\d{4})#';
-  $patterns_in_page['kpid'       ] = '#id2:(\d+)#';
-  $patterns_in_page['country'    ] = '#(<a[^>]+/country/.*?)</div>#s';
-  $patterns_in_page['category'   ] = ['#argcat".*?(<a.*?)</div>#s'           , FINDMODE_COMMALINKS];
-  $patterns_in_page['director'   ] = ['#lbl">Режиссёр:</span>(.*?)</div>#s'  , FINDMODE_COMMALINKS];
-  $patterns_in_page['actors'     ] = ['#lbl">В ролях:</span>(.*?)</div>#s'   , FINDMODE_COMMALINKS];
-  $patterns_in_page['scenarist'  ] = ['#lbl">Сценарий:</span>(.*?)</div>#s'  , FINDMODE_COMMALINKS];
-  $patterns_in_page['producer'   ] = ['#lbl">Продюсер:</span>(.*?)</div>#s'  , FINDMODE_COMMALINKS];
-  $patterns_in_page['composer'   ] = ['#lbl">Композитор:</span>(.*?)</div>#s', FINDMODE_COMMALINKS];
-  $patterns_in_page['tags'       ] = ['#<i>Теги:(.*?)</div>#s'               , FINDMODE_COMMALINKS];
-  $patterns_in_page['premiere'   ] = '#lbl">Премьера \(мир\):(.*?)</div>#s';
-  $patterns_in_page['premiere_rf'] = '#lbl">Премьера \(РФ\):(.*?)</div>#s';
-  $patterns_in_page['budget'     ] = '#lbl">Бюджет:</span>(.*?)</div>#s';
-  $patterns_in_page['time'       ] = ['#lbl">Время:</span>(.*?)</div>#s', FINDMODE_TIME];
-  $patterns_in_page['translation'] = '#lbl">Перевод:</span>(.*?)</div>#s';
-  $patterns_in_page['rating_hd'        ] = '#our-rating.*?>(.*?)<#';
-  $patterns_in_page['rating_hd_votes'  ] = '#rating-num.*?>\((\d+.*?)[<\)]#';
-  $patterns_in_page['rating_kp'        ] = '#kp_rating.*?>(.*?)<#s';
-  $patterns_in_page['rating_kp_votes'  ] = '#kp_num[^>]+>(\d+.*?)<#s';
-  $patterns_in_page['rating_imdb'      ] = '#imdb_rating.*?>(.*?)<#s';
-  $patterns_in_page['rating_imdb_votes'] = '#imdb_num[^>]+>(\d+.*?)<#s';
-  $patterns_in_page['date'       ] = '#/(\d{4}/\d{2}/\d{2})/#';
-  $patterns_in_page['descr'      ] = '#(<div[^>]+class="[^"]*descr.*?</div>)#s';
-
-  $pattern_skip_if_no_link = '#id="reason"#'; // skip deleted videos
-  // ****************************************
-
-  // searching blocks in the loaded html
-  if (!preg_match_all($pattern_block, $html, $matches))
-    ErrorExit('Pattern for search are blocks nothing found.', true);
-
-  // ================= MAIN LOOP FOR SCANNING PAGE =================
-  $upd_count = 0;
-  foreach ($matches[0] as $block) {
-    $params = array();
-
-    // searching field values in the block
-    foreach ($patterns_in_block as $key => $p) $params[$key] = FindField($p, $block);
-
-    if (!$params['page']) ErrorExit('Regex pattern for search are `page` in blocks nothing found. Need update the php script.', true);
-
-    $page_url = FullLink($params['page'], $f3->get('url_base'));
-    $page = LoadPage($page_url);
-
-    // searching field values in the url
-    foreach ($patterns_in_link as $key => $p) $params[$key] = FindField($p, $page_url);
-    // searching field values in the loaded page
-    foreach ($patterns_in_page as $key => $p) $params[$key] = FindField($p, $page);
-
-    if (!$params['link'])  {
-      if (preg_match($pattern_skip_if_no_link, $page, $m)) continue;
-      ErrorExit('Regex pattern for search are `link` in blocks nothing found. Need update the php script. '.$page_url, true);
-    }
-    if (!$params['id'  ]) ErrorExit('Regex pattern for search are `id` nothing found. Need update the php script. '  .$page_url, true);
-    if (!$params['name']) ErrorExit('Regex pattern for search are `name` nothing found. Need update the php script. '.$page_url, true);
-
-    $params['id'  ] = (int)$params['id'  ];
-    $params['year'] = (int)$params['year'];
-    $params['kpid'] = (int)$params['kpid'];
-    $params['time'] = (int)$params['time'];
-
-    if ($last_id && ($params['id'] <= $last_id)) continue; // Skip all videos with ID less or equal $last_id
-    
-    $params['rating_hd'        ] = (float)$params['rating_hd'];
-    $params['rating_kp'        ] = (float)$params['rating_kp'];
-    $params['rating_imdb'      ] = (float)$params['rating_imdb'];
-    $params['rating_hd_votes'  ] = (int)$params['rating_hd_votes'];
-    $params['rating_kp_votes'  ] = (int)$params['rating_kp_votes'];
-    $params['rating_imdb_votes'] = (int)$params['rating_imdb_votes'];
-    $params['isserial'         ] = (int)$params['isserial'];
-
-    // hdkinoteatr parsing -----------------------------------
-    $translates_count = substr_count($params['link'], '"file":');
-    if ($translates_count==1) {
-      if (!$params['translation']) 
-        $params['translation'] = RegexValue('#"comment":\s*"(.*?)"#', $params['link']);
-      $params['link'] = RegexValue('#"file":\s*"(.*?)"#', $params['link']);
-    }
-
-    if (preg_match_all('#oid=[\w-]+&id=[\w-]+&hash=\w+#', $params['link'], $matches)) {
-      foreach ($matches[0] as $m) {
-        $params['link'] = str_replace($m, DecodeHDkinotatrVKlink($m, $page), $params['link']);
-      }
-    }
-    // --------------------------------------------------------
-
-    // Remove years from title
-    if (preg_match('#\([\d-]{4,}\)#', $params['name'], $m))
-      $params['name'] = trim(str_replace($m[0], '', $params['name']));
-
-    if ($f3->get('engtitle_in_title')) {
-      // Separate names
-      $names = explode($f3->get('titles_separator'), $name);
-      if (count($names) > 1) {
-        $params['name'    ] = Trim($names[0]);
-        $params['name_eng'] = Trim($names[1]);
-      }
-    }
-
-    $upd_count += InsertVideo($db, (int)$params['id'], $params, $videos_columns, $sql_update);
-  }
-  // ===================== END OF SCANNING PAGE ====================
-
-  if ($upd_count) {
-    if ($last_id) $f3->set('clear_cache_videos', true);
-    else          ClearTableCache($f3, 'videos');
-  }
-
-  if ($last_id) 
-    return $upd_count;
-
-  ExitOk("Records ".($sql_update ? "UPDATED" : "INSERTED")." successfully", $upd_count);
-}
-
-///////////////////////////////////////////////////////////////////////////////
 function GelVideoFileds($as_array=0) {
   $fields = "id,name,name_eng,link,page,year,kpid,image,director,actors,scenarist,producer,composer,premiere,premiere_rf,budget,time,translation,rating_hd,rating_hd_votes,rating_kp,rating_kp_votes,rating_imdb,rating_imdb_votes,date,isserial,descr";
   if ($as_array) return explode(',', $fields);
@@ -589,11 +596,11 @@ function GelVideoFileds($as_array=0) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-function InsertVideo($db, $id, $params, $videos_columns, $sql_update=false) {
+function InsertVideo($f3, $db, $id, $params, $videos_columns, $sql_update=false) {
   $db->beginTransaction();
-  UpdateTable($db, 'categories', $params['category' ], 'video_categories', 'category' , $id, 32);
-  UpdateTable($db, 'countries' , $params['country'  ], 'video_countries' , 'country'  , $id, 32);
-  UpdateTable($db, 'tags'      , $params['tags'     ], 'video_tags'      , 'tag'      , $id, 64);
+  UpdateTable($f3, $db, 'categories', $params['category' ], 'video_categories', 'category' , $id, 32);
+  UpdateTable($f3, $db, 'countries' , $params['country'  ], 'video_countries' , 'country'  , $id, 32);
+  UpdateTable($f3, $db, 'tags'      , $params['tags'     ], 'video_tags'      , 'tag'      , $id, 64);
 
   // Update the database with values
   $fields = GelVideoFileds();
@@ -741,7 +748,7 @@ function CheckMaxLen($data, $maxlen) { return mb_strlen($data) > $maxlen ? mb_su
 
 ///////////////////////////////////////////////////////////////////////////////
 // Обновление таблицы с полями id и name, а также 
-function UpdateTable($conn, $table, $names_str, $table_video, $field, $video_id, $name_maxlen) {
+function UpdateTable($f3, $conn, $table, $names_str, $table_video, $field, $video_id, $name_maxlen) {
     // Получаем список имён, которые уже добавлены в базу данных
     $names_str = trim(str_replace("'", "", $names_str)); if ($names_str=="" || $names_str=="||") return;
     $is_people = ($table=="people");
