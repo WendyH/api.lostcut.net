@@ -1,5 +1,4 @@
-<?php
-header('Content-Type: text/html; charset=utf-8');
+<?php header('Content-Type: text/html; charset=utf-8');
 
 define("MINIMUM_QUERY_LENGHT", 2);
 define("FINDMODE_COMMALINKS" , 1);
@@ -247,6 +246,7 @@ function GetVideos($f3) {
   $q         = isset($_REQUEST['q'       ]) ? $_REQUEST['q'       ] : "";  // query for searching videos (by name)
   $category  = isset($_REQUEST['category']) ? $_REQUEST['category'] : 0;   // id of the category
   $country   = isset($_REQUEST['country' ]) ? $_REQUEST['country' ] : 0;   // id of the country
+  $tag       = isset($_REQUEST['tag'     ]) ? $_REQUEST['tag'     ] : 0;   // id of the tag
   $year      = isset($_REQUEST['year'    ]) ? $_REQUEST['year'    ] : 0;   // year
   $letter    = isset($_REQUEST['letter'  ]) ? $_REQUEST['letter'  ] : "";  // first letter by name
   $ord       = isset($_REQUEST['ord'     ]) ? $_REQUEST['ord'     ] : "";  // order by field
@@ -262,20 +262,40 @@ function GetVideos($f3) {
   $translation = isset($_REQUEST['translation']) ? $_REQUEST['translation'] : "";  // query for translations search
   $human_read  = isset($_REQUEST['hr'         ]) ? $_REQUEST['hr'         ] : 0;   // formatting output
   
-  if ($q && strlen($q) < MINIMUM_QUERY_LENGHT) ErrorExit("Too short query");
+  if ($q && strlen($q) < MINIMUM_QUERY_LENGTH) ErrorExit("Too short query");
 
-  $start     = (int)abs($start);
-  $limit     = (int)abs($limit);
-  $id        = (int)abs($id);
-  $kpid      = (int)abs($kpid);
-  $category  = (int)abs($category);
-  $country   = (int)abs($country);
-  $year      = (int)abs($year);
-  $serials   = (int)abs($serials);
-  $rating_im = (float)abs($rating_im);
-  $rating_kp = (float)abs($rating_kp);
-  $rating_hd = (float)abs($rating_hd);
-  $human_read= (int)abs($human_read);
+  $cache_name = "videos_".md5($_SERVER["QUERY_STRING"]);
+  $no_cache   = isset($_REQUEST['_']) || isset($_REQUEST['rnd']);
+  if (!$no_cache && LoadCache($f3, $cache_name)) return;
+
+  $db = new DB\SQL($f3->get('conn_string'), $f3->get('db_username'), $f3->get('db_password'));
+
+  // make safe identificators
+  $start     = abs((int)$start);
+  $limit     = abs((int)$limit);
+  $id        = abs((int)$id   );
+  $kpid      = abs((int)$kpid );
+  if ($category) {
+    $arr = explode(',', $category);
+    foreach($arr as &$val) $val = abs((int)$val);
+    $category = implode(',', $arr);
+  }
+  if ($country) {
+    $arr = explode(',', $country);
+    foreach($arr as &$val) $val = abs((int)$val);
+    $country = implode(',', $arr);
+  }
+  if ($tag) {
+    $arr = explode(',', $tag);
+    foreach($arr as &$val) $val = abs((int)$val);
+    $tag = implode(',', $arr);
+  }
+  $year      = abs((int)$year);
+  $serials   = abs((int)$serials);
+  $rating_im = abs((float)$rating_im);
+  $rating_kp = abs((float)$rating_kp);
+  $rating_hd = abs((float)$rating_hd);
+  $human_read= abs((int)$human_read);
 
   if ($ord) {
     $direction = ($ord[0]=='-') ? "DESC" : "";
@@ -284,19 +304,14 @@ function GetVideos($f3) {
     $order[] = "$ord $direction";
   }
 
-  $cache_name = "videos_".md5($_SERVER["QUERY_STRING"]);
-
-  if (LoadCache($f3, $cache_name)) return;
-
-  $db = new DB\SQL($f3->get('conn_string'), $f3->get('db_username'), $f3->get('db_password'));
-
   $sql = "SELECT v.*, " .
     "(SELECT GROUP_CONCAT(n.name) FROM video_countries  AS vn LEFT JOIN countries  AS n ON n.id = vn.country  WHERE vn.video=v.id) AS country, ".
     "(SELECT GROUP_CONCAT(c.name) FROM video_categories AS vc LEFT JOIN categories AS c ON c.id = vc.category WHERE vc.video=v.id) AS genre ".
     "FROM videos AS v";
 
-  if ($category ) { $params[':category' ]=$category ; $where[]="w.category=:category"; $sql .= " INNER JOIN video_categories AS w ON w.video=v.id"; }
-  if ($country  ) { $params[':country'  ]=$country  ; $where[]="q.country =:country" ; $sql .= " INNER JOIN video_countries  AS q ON q.video=v.id"; }
+  if ($category ) { $params[':category' ]=$category ; $where[]="w.category IN (:category)"; $sql .= " INNER JOIN video_categories AS w ON w.video=v.id"; }
+  if ($country  ) { $params[':country'  ]=$country  ; $where[]="q.country  IN (:country)" ; $sql .= " INNER JOIN video_countries  AS q ON q.video=v.id"; }
+  if ($tag      ) { $params[':tag'      ]=$tag      ; $where[]="y.tag IN (:tag)"          ; $sql .= " INNER JOIN video_tags       AS y ON y.video=v.id"; }
   if ($year     ) { $params[':year'     ]=$year     ; $where[]="year=:year"; }
   if ($serials<2) { $params[':serials'  ]=$serials  ; $where[]="isserial=:serials"; }
   if ($rating_im) { $params[':rating_im']=$rating_im; $where[]="rating_imdb>=:rating_im"; }
@@ -338,15 +353,16 @@ function GetVideos($f3) {
   else
     $data = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
 
-  SaveCache($f3, $cache_name, $data);
+  if (!$no_cache) SaveCache($f3, $cache_name, $data);
   echo $data;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 function ListTable($f3, $table_name) {
   
+  $no_cache   = isset($_REQUEST['_']) || isset($_REQUEST['rnd']);
   $cache_name = $table_name."_".md5($_SERVER["QUERY_STRING"]);
-  if (LoadCache($f3, $cache_name)) return;
+  if (!$no_cache && LoadCache($f3, $cache_name)) return;
 
   $order = array();
 
@@ -391,7 +407,7 @@ function ListTable($f3, $table_name) {
   else
     $data = json_encode($result, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
 
-  if ($data) SaveCache($f3, $cache_name, $data);
+  if ($data && !$no_cache) SaveCache($f3, $cache_name, $data);
   echo $data;
 }
 
