@@ -1,10 +1,13 @@
 <?php header('Content-Type: text/html; charset=utf-8');
 
-define("MINIMUM_QUERY_LENGHT", 2);
+define("MINIMUM_QUERY_LENGTH", 2);
+define("MAXIMUM_QUERY_LENGTH", 200);
 define("FINDMODE_COMMALINKS" , 1);
 define("FINDMODE_UNESCAPE"   , 2);
-define("FINDMODE_2VALUES"    , 4);
+define("FINDMODE_NAMECASE"   , 4);
 define("FINDMODE_TIME"       , 8);
+define("FINDMODE_NUMBER"     ,16);
+define("FINDMODE_DATETIME"   ,32);
 
 define('ERROR_REPORTING_EMAIL', ''); // email for reporting critical errors
 
@@ -103,7 +106,7 @@ function ScanPage($f3, $page=1, $last_id=0) {
   $patterns_in_page['rating_kp_votes'  ] = '#kp_num[^>]+>(\d+.*?)<#s';
   $patterns_in_page['rating_imdb'      ] = '#imdb_rating.*?>(.*?)<#s';
   $patterns_in_page['rating_imdb_votes'] = '#imdb_num[^>]+>(\d+.*?)<#s';
-  $patterns_in_page['date'       ] = '#/(\d{4}/\d{2}/\d{2})/#';
+  $patterns_in_page['date'       ] = ['#/\d{4}/\d{2}/\d{2}/">(.*?)</#', FINDMODE_DATETIME];
   $patterns_in_page['descr'      ] = '#(<div[^>]+class="[^"]*descr.*?</div>)#s';
 
   $pattern_skip_if_no_link = '#id="reason"#'; // skip deleted videos
@@ -200,7 +203,7 @@ function ScanPage($f3, $page=1, $last_id=0) {
 function CheckUpdates($f3) {
   $state_file = $f3->get('file_state');
   $interval   = $f3->get('checking_interval');
-  $state_data = file_exists($state_file) ? file_get_contents($state_file) : "";
+  $state_data = file_exists($state_file) ? @file_get_contents($state_file) : "";
   
   $last_id    = (int)GetStateValue($state_data, "last_id"  );
   $last_time  = (int)GetStateValue($state_data, "timestamp");
@@ -263,6 +266,7 @@ function GetVideos($f3) {
   $human_read  = isset($_REQUEST['hr'         ]) ? $_REQUEST['hr'         ] : 0;   // formatting output
   
   if ($q && strlen($q) < MINIMUM_QUERY_LENGTH) ErrorExit("Too short query");
+  if ($q && strlen($q) > MAXIMUM_QUERY_LENGTH) ErrorExit("Too big query");
 
   $cache_name = "videos_".md5($_SERVER["QUERY_STRING"]);
   $no_cache   = isset($_REQUEST['_']) || isset($_REQUEST['rnd']);
@@ -343,7 +347,7 @@ function GetVideos($f3) {
   if (count($order)>0) $sql .= " ORDER BY ".implode(', ', $order);
 
   // default values
-  if (!strpos($sql, 'ORDER' )) $sql .= " ORDER BY id DESC";
+  if (!strpos($sql, 'ORDER' )) $sql .= " ORDER BY date DESC";
   if (!strpos($sql, 'LIMIT' )) $sql .= " LIMIT $start,$limit";
 
   $result = $db->exec($sql, $params);
@@ -445,7 +449,7 @@ function GetSeries($f3) {
         $result[] = ["playlist"=>FindSelectItems($data, $url, 'episode', $i), "comment"=>"Сезон $i"];
       }
     } else {
-      $result = FindSelectItems($html, 'episode');
+      $result = FindSelectItems($html, $url, 'episode');
     }
   }
   
@@ -649,7 +653,7 @@ function InsertVideo($f3, $db, $id, $params, $videos_columns, $sql_update=false)
 // Get field value from the html by regex pattern
 // $mode: 0 | FINDMODE_COMMALINKS | FINDMODE_2VALUES | FINDMODE_TIME
 function FindField($options, $text, $mode=0) {
-
+  $skip = array();
   if (is_array($options)) {
     $pattern = $options[0];
     $mode    = isset($options[1]) ? $options[1] : 0;
@@ -668,22 +672,22 @@ function FindField($options, $text, $mode=0) {
 
   switch ($mode) {
 
+    case FINDMODE_NAMECASE:
     case FINDMODE_COMMALINKS:
       if (preg_match_all("#<a.*?</a>#", $value, $m)) {
         $values = array();
-        foreach ($m[0] as $part)
-          $values[] = trim(Html2Text($part));
+        foreach ($m[0] as $part) {
+          $val = trim(Html2Text($part)); if (in_array($val, $skip)) continue;
+          if ($mode & FINDMODE_NAMECASE) 
+            $val = mb_convert_case($val, MB_CASE_TITLE, "UTF-8");
+          $values[] = $val;
+        }
         $value = implode(', ', $values);
       } else {
         $value = Html2Text($value);
+        if ($mode & FINDMODE_NAMECASE) 
+          $value = mb_convert_case($value, MB_CASE_TITLE, "UTF-8");
       }
-      break;
-
-    case FINDMODE_2VALUES:
-      if (preg_match($pattern, $text, $m))
-          $value = Html2Text($m[1]) . " (" . Html2Text($m[2]) . ")";
-      else
-          $value = Html2Text($value);
       break;
 
     case FINDMODE_TIME:
@@ -695,6 +699,22 @@ function FindField($options, $text, $mode=0) {
       $value = stripcslashes(Html2Text($value));
       break;
      
+    case FINDMODE_DATETIME:
+      $value = Html2Text($value);
+      $part_date = RegexValue("#(\d{2}.\d{2}.\d{4})#", $value);
+      $part_time = RegexValue("#(\d{2}:\d{2})#"      , $value);
+      $format = "d.m.Y H:i";
+      if (strpos($value, "Сегодня")!==false) {
+        $part_date = date("d.m.Y");
+      }
+      if (strpos($value, "Вчера")!==false) {
+        $part_date = date("d.m.Y", time()-(60*60*24));
+      }
+      $date  = DateTime::createFromFormat($format, "$part_date $part_time");
+      if ($date) $value = date("Y-m-d H:i:s", $date->getTimestamp());
+      else $value = date("Y-m-d H:i:s");
+      break;
+
     default:
       $value = Html2Text($value);
       break;
@@ -749,11 +769,13 @@ function LoadPage($url) {
              "Referer: http://www.hdkinoteatr.com/\r\n" .
              "User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36\r\n";
   $options = array('http'=>array('method'=>'GET', 'header'=>$headers, 'timeout'=>14));
-  $page    = file_get_contents($url, false, stream_context_create($options));
-  foreach($http_response_header as $c => $h) {
-    if (stristr($h, 'content-encoding') and stristr($h, 'gzip')) {
-      $page = gzdecode($page);
-      break;
+  $page    = @file_get_contents($url, false, stream_context_create($options));
+  if ($http_response_header) {
+    foreach($http_response_header as $c => $h) {
+      if (stristr($h, 'content-encoding') and stristr($h, 'gzip')) {
+        $page = gzdecode($page);
+        break;
+      }
     }
   }
   return $page;
@@ -924,8 +946,8 @@ function GetSeriesInfoByKinopoiskID($f3, $kpid) {
 
   $data = LoadPage("https://www.kinopoisk.ru/film/$kpid/episodes/");
   $data = mb_convert_encoding($data, "utf-8", "windows-1251");
-  if (preg_match("#<td[^>]+class=\"news\">([^<]+),\s+(\d{4})#", $data, $m))
-    $info = GetTheTVDBInfo($f3, $m[1], $m[2]);
+//  if (preg_match("#<td[^>]+class=\"news\">([^<]+),\s+(\d{4})#", $data, $m))
+//    $info = GetTheTVDBInfo($f3, $m[1], $m[2]);
   if (preg_match_all("#(<h[^>]+moviename-big.*?)</h#s", $data, $matches)) {
     $season  = 1;
     $episode = 1;
