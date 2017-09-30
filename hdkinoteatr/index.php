@@ -416,6 +416,32 @@ function ListTable($f3, $table_name) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+function JSDecode($data) {
+  $data = str_replace("encodeURIComponent(", "", $data);
+  $data = str_replace("'),", "',", $data);
+  $data = str_replace("'", "\""  , $data);
+  $data = str_replace(array("\n","\r"),"", $data); 
+  $data = preg_replace('/(\s*)(\w+):(\s+)/','"$2":', $data);
+  $data = preg_replace('/(,\s*)(})/','$2', $data);
+  $json = json_decode($data, true);
+  return $json;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+function FindEpisodes($json, $url) {
+  $result = array();
+  $frmt   = count($json["episodes"]) > 99 ? "%03d" : "%02d";
+  foreach ($json["episodes"] as $e) {
+    $season  = $e[0];
+    $episode = $e[1];
+    $name = sprintf("$frmt серия", $episode);
+    $link = "$url?season=$season&episode=$episode";
+    $result[] = ["comment"=>$name, "file"=>$link];
+  }
+  return $result;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 function GetSeries($f3) {
 
   // parameters
@@ -438,21 +464,38 @@ function GetSeries($f3) {
 
   if (isset($_REQUEST['html'])) die($html);
 
+  $data = FindField('#VideoBalancer\((.*?)\);#s', $html);
+
+  if (!$data) {
+    if (!$params['page']) ErrorExit('No VideoBalancer data found in iframe. Need update the php script.', true);
+  }
+
+  $json = JSDecode($data);
+
+
   if ($trans) {
-    $result  = FindSelectItems($html, $url, 'translator');
+    $result = array();
+    foreach ($json["translations"] as $t) {
+      $result[] = ["comment"=>$t[1], "file"=> str_replace($hash, $t[0], $url) ];
+    }
+
   } else {
-    $seasons = FindSelectItems($html, $url, 'season');
+
+
+    $seasons = $json["seasons"];
     if (count($seasons)>0) {
-      foreach ($seasons as $s) {
-        $i = intval(RegexValue("#season=(\d+)#", $s["file"])); if (!$i) continue;
+      foreach ($seasons as $i) {
         $data = LoadPage("$url?season=$i");
-        $result[] = ["playlist"=>FindSelectItems($data, $url, 'episode', $i), "comment"=>"Сезон $i"];
+        $data = FindField('#VideoBalancer\((.*?)\);#s', $data);
+        $json = JSDecode($data);
+
+        $result[] = ["playlist"=>FindEpisodes($json, $url), "comment"=>"Сезон $i"];
       }
     } else {
-      $result = FindSelectItems($html, $url, 'episode');
+      $result = FindEpisodes($json, $url);
     }
   }
-  
+
   if ($kpid) {
     $info = GetSeriesInfoByKinopoiskID($f3, $kpid);
     // set for each episode in playlist name and image from $info
