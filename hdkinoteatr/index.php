@@ -10,9 +10,11 @@ define("FINDMODE_NUMBER"     ,16);
 define("FINDMODE_DATETIME"   ,32);
 
 define('ERROR_REPORTING_EMAIL', ''); // email for reporting critical errors
+define('ERROR_REPORTING_EMAIL_FROM', "api@hdkinoteatr"); // field "from" in e-mails
+define('ERROR_REPORTING_EMAIL_INTERVAL', 48 * 60 * 60 ); // limit interval for e-mail send (maximum 1 mail in 48 hours)
 
 $f3 = require('../f3/lib/base.php'); // Fat Free micro framework https://fatfreeframework.com
-$f3->set('DEBUG', 3);
+$f3->set('DEBUG', 0);
 
 // Configuration
 $f3->set('url_base'    , 'http://www.hdkinoteatr.com'); // base url for reconscruct image links
@@ -24,11 +26,12 @@ $f3->set('conn_string' , 'mysql:host=localhost;port=3306;dbname=hdkinoteatr'); /
 
 $f3->set('cache_dir'          , 'cache');            // cache directory
 $f3->set('cache_max_size'     , 2000 * 1024 * 1024); // cache maximum size (in bytes)
-$f3->set('checking_interval'  , 3600 * 2);           // intefval of checks site for updates (in seconds)
+$f3->set('checking_interval'  , 3600 * 1);           // intefval of checks site for updates (in seconds)
 $f3->set('file_state'         , 'update.state');     // file with stored last_id and last_time data
 $f3->set('maximum_pages_load' , 4);                  // maximum pages to load for searching last_id
 $f3->set('cache_short_life'   , 43200);              // cache lifetime of the serials playlist = 12 hours (in seconds)
 $f3->set('cache_episodes_life', 86400 * 2);          // cache lifetime by info about episodes of the show = 2 days (in seconds)
+$f3->set('updating_flag_file' , 'updating.flag');    // flag file for signaling that updating is running
 
 $f3->set('engtitle_in_title', 0 ); // search english title in title pattern
 $f3->set('titles_separator', '/'); // separator in title for titles in other lang
@@ -201,6 +204,14 @@ function ScanPage($f3, $page=1, $last_id=0) {
 
 ///////////////////////////////////////////////////////////////////////////////
 function CheckUpdates($f3) {
+  $updating_flag_file = $f3->get('updating_flag_file');
+  if (file_exists($updating_flag_file)) {
+    if ((time()-filemtime($updating_flag_file)) < 3600) {
+      return;
+    }
+  }
+  file_put_contents($updating_flag_file, date("Y-m-d H:i:s"));
+
   $state_file = $f3->get('file_state');
   $interval   = $f3->get('checking_interval');
   $state_data = file_exists($state_file) ? @file_get_contents($state_file) : "";
@@ -208,28 +219,30 @@ function CheckUpdates($f3) {
   $last_id    = (int)GetStateValue($state_data, "last_id"  );
   $last_time  = (int)GetStateValue($state_data, "timestamp");
 
-  if ((time()-$last_time) < $interval) return;
+  if ((time()-$last_time) > $interval) {
+    if (!$last_id) $last_id = GetLastIdFromDatabase($f3);
+   
+    $max_pages = (int)$f3->get('maximum_pages_load');
+    for ($i=1; $i <= $max_pages; $i++) {
+      if (!ScanPage($f3, $i, $last_id)) 
+        break; // not found id greater then last_id in the loaded page
+    }
+
+    if ($f3->get('clear_cache_videos')) {
+      ClearTableCache($f3, 'videos');
+      if ($f3->get('clear_cache_categories')) ClearTableCache($f3, 'categories');
+      if ($f3->get('clear_cache_countries' )) ClearTableCache($f3, 'countries' );
+      if ($f3->get('clear_cache_tags'      )) ClearTableCache($f3, 'tags'      );
+      $last_id = GetLastIdFromDatabase($f3);
+      SetStateValue($state_data, "last_id", $last_id);
+      SetStateValue($state_data, "added", date("Y-m-d H:i:s"));
+    }
+
+    SetStateValue($state_data, "timestamp", time());
+    file_put_contents($state_file, $state_data);
+  }
   
-  if (!$last_id) $last_id = GetLastIdFromDatabase($f3);
- 
-  $max_pages = (int)$f3->get('maximum_pages_load');
-  for ($i=1; $i <= $max_pages; $i++) {
-    if (!ScanPage($f3, $i, $last_id)) 
-      break; // not found id greater then last_id in the loaded page
-  }
-
-  if ($f3->get('clear_cache_videos')) {
-    ClearTableCache($f3, 'videos');
-    if ($f3->get('clear_cache_categories')) ClearTableCache($f3, 'categories');
-    if ($f3->get('clear_cache_countries' )) ClearTableCache($f3, 'countries' );
-    if ($f3->get('clear_cache_tags'      )) ClearTableCache($f3, 'tags'      );
-    $last_id = GetLastIdFromDatabase($f3);
-    SetStateValue($state_data, "last_id", $last_id);
-    SetStateValue($state_data, "added", date("Y-m-d H:i:s"));
-  }
-
-  SetStateValue($state_data, "timestamp", time());
-  file_put_contents($state_file, $state_data);
+  unlink($updating_flag_file);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -267,6 +280,8 @@ function GetVideos($f3) {
   
   if ($q && strlen($q) < MINIMUM_QUERY_LENGTH) ErrorExit("Too short query");
   if ($q && strlen($q) > MAXIMUM_QUERY_LENGTH) ErrorExit("Too big query");
+
+  if (substr($q, 0, 2) == " !") ErrorExit("Your script not working");
 
   $cache_name = "videos_".md5($_SERVER["QUERY_STRING"]);
   $no_cache   = isset($_REQUEST['_']) || isset($_REQUEST['rnd']);
@@ -431,12 +446,16 @@ function JSDecode($data) {
 function FindEpisodes($json, $url) {
   $result = array();
   $frmt   = count($json["episodes"]) > 99 ? "%03d" : "%02d";
+  $subs   = isset($json["subtitles"]["master_vtt"]);
+  $season = $json["season"];
   foreach ($json["episodes"] as $e) {
-    $season  = $e[0];
-    $episode = $e[1];
+    $episode = $e;
     $name = sprintf("$frmt серия", $episode);
     $link = "$url?season=$season&episode=$episode";
-    $result[] = ["comment"=>$name, "file"=>$link];
+    if (subs)
+      $result[] = ["comment"=>$name, "file"=>$link, "subs"=>true];
+    else
+      $result[] = ["comment"=>$name, "file"=>$link];
   }
   return $result;
 }
@@ -467,11 +486,10 @@ function GetSeries($f3) {
   $data = FindField('#VideoBalancer\((.*?)\);#s', $html);
 
   if (!$data) {
-    if (!$params['page']) ErrorExit('No VideoBalancer data found in iframe. Need update the php script.', true);
+    if (!$params['page']) ErrorExit("No VideoBalancer data found in iframe. Need update the php script. \nLine: ".__LINE__." (in API index.php) \nUrl: $url \nHtml content: ".htmlentities($html), true);
   }
 
   $json = JSDecode($data);
-
 
   if ($trans) {
     $result = array();
@@ -481,14 +499,12 @@ function GetSeries($f3) {
 
   } else {
 
-
     $seasons = $json["seasons"];
     if (count($seasons)>0) {
       foreach ($seasons as $i) {
         $data = LoadPage("$url?season=$i");
         $data = FindField('#VideoBalancer\((.*?)\);#s', $data);
         $json = JSDecode($data);
-
         $result[] = ["playlist"=>FindEpisodes($json, $url), "comment"=>"Сезон $i"];
       }
     } else {
@@ -565,7 +581,9 @@ function LoadCache($f3, $table_name, $short_life=false) {
     if ($short_life && ((time()-filemtime($cache_file)) > $f3->get('cache_short_life'))) {
       return false;
     }
-    echo gzuncompress(file_get_contents($cache_file));
+    $udata = gzuncompress(file_get_contents($cache_file));
+    if (preg_match('/\b00 серия/', $udata, $matches)) return false;
+    echo $udata;
     return true;
   }
   return false;
@@ -772,12 +790,13 @@ function Html2Text($html) {
 
 ///////////////////////////////////////////////////////////////////////////////
 function ErrorExit($msg, $email_me=false) { 
-  if (defined('ERROR_REPORTING_EMAIL') && $email_me) {
-    $email_interval  = 48 * 60 * 60;
+  if ($email_me && defined('ERROR_REPORTING_EMAIL') && ERROR_REPORTING_EMAIL) {
     $email_sent_file = 'email_sent';
     $email_sent_time = file_exists($email_sent_file) ? (int)file_get_contents($email_sent_file) : 0;
+    $email_interval  = defined('ERROR_REPORTING_EMAIL_INTERVAL') ? ERROR_REPORTING_EMAIL_INTERVAL : (48 * 60 * 60);
     if ((time()-$email_sent_time) > $email_interval) {
-      mail(ERROR_REPORTING_EMAIL, "Error in API script ".__FILE__, $msg);
+      $email_from = defined('ERROR_REPORTING_EMAIL_FROM') ? ERROR_REPORTING_EMAIL_FROM : "api@hdkinoteatr";
+      mail(ERROR_REPORTING_EMAIL, "Error in API script ".__FILE__, $msg, "From: $email_from", "-f$email_from");
       file_put_contents($email_sent_file, time());
     }
   }  
