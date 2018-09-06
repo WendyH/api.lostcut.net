@@ -294,18 +294,34 @@ function GetVideos($f3) {
   $limit     = abs((int)$limit);
   $id        = abs((int)$id   );
   $kpid      = abs((int)$kpid );
-  $categ_n   = ((int)$category < 0) ? "NOT" : "";
-  $country_n = ((int)$country  < 0) ? "NOT" : "";
+  $category_excl = "";
+  $country_excl  = "";
 
   if ($category) {
     $arr = explode(',', $category);
-    foreach($arr as &$val) $val = abs((int)$val);
-    $category = implode(',', $arr);
+    $arr_cat_excl = array();
+    $arr_cat      = array();
+    foreach($arr as &$val) {
+      if ((int)$val < 0) 
+        $arr_cat_excl[] = abs((int)$val); 
+      else 
+        $arr_cat[] = abs((int)$val); 
+    }
+    $category_excl = implode(',', $arr_cat_excl);
+    $category      = implode(',', $arr_cat);
   }
   if ($country) {
     $arr = explode(',', $country);
-    foreach($arr as &$val) $val = abs((int)$val);
-    $country = implode(',', $arr);
+    $arr_country_excl = array();
+    $arr_country      = array();
+    foreach($arr as &$val) {
+      if ((int)$val < 0) 
+        $arr_country_excl[] = abs((int)$val); 
+      else 
+        $arr_country[] = abs((int)$val); 
+    }
+    $country_excl = implode(',', $arr_country_excl);
+    $country      = implode(',', $arr_country);
   }
   if ($tag) {
     $arr = explode(',', $tag);
@@ -333,15 +349,22 @@ function GetVideos($f3) {
 
   if ($category) {
     $params[':category'] = $category;
-    if ($categ_n) $where[]="v.id NOT IN (SELECT video from video_categories WHERE category IN (".$category."))";
-    else          $where[]="w.category IN (:category)";
+    $where[]="w.category IN (:category)";
+  }
+  if ($category_excl) {
+    $where[]="v.id NOT IN (SELECT video from video_categories WHERE category IN (".$category_excl."))";
+  }
+  if ($category or $category_excl) {
     $sql .= " INNER JOIN video_categories AS w ON w.video=v.id";
   }
-
   if ($country) {
     $params[':country'] = $country;
-    if ($country_n) $where[]="v.id NOT IN (SELECT video from video_countries WHERE country IN (".$country."))";
-    else            $where[]="q.country IN (:country)";
+    $where[]="q.country IN (:country)";
+  }
+  if ($country_excl) {
+    $where[]="v.id NOT IN (SELECT video from video_countries WHERE country IN (".$country."))";
+  }
+  if ($country or $country_excl) {
     $sql .= " INNER JOIN video_countries  AS q ON q.video=v.id";
   }
   
