@@ -294,6 +294,9 @@ function GetVideos($f3) {
   $limit     = abs((int)$limit);
   $id        = abs((int)$id   );
   $kpid      = abs((int)$kpid );
+  $categ_n   = ((int)$category < 0) ? "NOT" : "";
+  $country_n = ((int)$country  < 0) ? "NOT" : "";
+
   if ($category) {
     $arr = explode(',', $category);
     foreach($arr as &$val) $val = abs((int)$val);
@@ -328,8 +331,20 @@ function GetVideos($f3) {
     "(SELECT GROUP_CONCAT(c.name) FROM video_categories AS vc LEFT JOIN categories AS c ON c.id = vc.category WHERE vc.video=v.id) AS genre ".
     "FROM videos AS v";
 
-  if ($category ) { $params[':category' ]=$category ; $where[]="w.category IN (:category)"; $sql .= " INNER JOIN video_categories AS w ON w.video=v.id"; }
-  if ($country  ) { $params[':country'  ]=$country  ; $where[]="q.country  IN (:country)" ; $sql .= " INNER JOIN video_countries  AS q ON q.video=v.id"; }
+  if ($category) {
+    $params[':category'] = $category;
+    if ($categ_n) $where[]="v.id NOT IN (SELECT video from video_categories WHERE category IN (".$category."))";
+    else          $where[]="w.category IN (:category)";
+    $sql .= " INNER JOIN video_categories AS w ON w.video=v.id";
+  }
+
+  if ($country) {
+    $params[':country'] = $country;
+    if ($country_n) $where[]="v.id NOT IN (SELECT video from video_countries WHERE country IN (".$country."))";
+    else            $where[]="q.country IN (:country)";
+    $sql .= " INNER JOIN video_countries  AS q ON q.video=v.id";
+  }
+  
   if ($tag      ) { $params[':tag'      ]=$tag      ; $where[]="y.tag IN (:tag)"          ; $sql .= " INNER JOIN video_tags       AS y ON y.video=v.id"; }
   if ($year     ) { $params[':year'     ]=$year     ; $where[]="year=:year"; }
   if ($serials<2) { $params[':serials'  ]=$serials  ; $where[]="isserial=:serials"; }
