@@ -1,4 +1,5 @@
-<?php header('Content-Type: text/html; charset=utf-8');
+<?php
+ini_set("log_errors", 1); ini_set("error_log", $_SERVER['SCRIPT_FILENAME'].".log"); ini_set('error_reporting', E_ALL); ini_set("display_errors", 0);
 
 define("MINIMUM_QUERY_LENGTH", 2);
 define("MAXIMUM_QUERY_LENGTH", 200);
@@ -9,7 +10,7 @@ define("FINDMODE_TIME"       , 8);
 define("FINDMODE_NUMBER"     ,16);
 define("FINDMODE_DATETIME"   ,32);
 
-define('ERROR_REPORTING_EMAIL', ''); // email for reporting critical errors
+define('ERROR_REPORTING_EMAIL', '');                     // email for reporting critical errors
 define('ERROR_REPORTING_EMAIL_FROM', "api@hdkinoteatr"); // field "from" in e-mails
 define('ERROR_REPORTING_EMAIL_INTERVAL', 48 * 60 * 60 ); // limit interval for e-mail send (maximum 1 mail in 48 hours)
 
@@ -38,7 +39,7 @@ $f3->set('titles_separator', '/'); // separator in title for titles in other lan
 
 // --------------------- API ROUTE --------------------------------------------
 
-$f3->route('GET /', function() { require("api.html"); }); // API docs
+$f3->route('GET /', function() { header('Content-Type: text/html; charset=utf-8'); require("api.html"); }); // API docs
 
 $f3->route('GET /categories', function($f3) { ListTable($f3, 'categories'); }); // Get categories
 $f3->route('GET /countries' , function($f3) { ListTable($f3, 'countries' ); }); // Get countries
@@ -57,6 +58,7 @@ exit;
 ///////////////////////////////////////////////////////////////////////////////
 // Loading and parse web page - searching blocks with video
 function ScanPage($f3, $page=1, $last_id=0) {
+  header("Content-Type: application/json");
   if (!$last_id) {
     $token = isset($_REQUEST['token']) ? $_REQUEST['token'] : "";
     if ($token=="<secret_token>") ExitOk("Records ".(isset($_REQUEST['u']) ? "UPDATED" : "INSERTED")." successfully", 10);
@@ -85,11 +87,11 @@ function ScanPage($f3, $page=1, $last_id=0) {
   $patterns_in_link['isserial'   ] = '#/series/#'; // if no groups, check it as boolean
 
   $patterns_in_page = array();
-  $patterns_in_page['name'       ] = [['#t1:"(.*?[^\\\\])"#', '#"og:title"[^>]+content="(.*?)"#'], FINDMODE_UNESCAPE];
-  $patterns_in_page['name_eng'   ] = ['#t2:"(.*?[^\\\\])"#', FINDMODE_UNESCAPE];
-  $patterns_in_page['link'       ] = [['#var\s*vkArr\s*=\s*\'(.*?)\';#', '#var\s*vkArr\s*=\s*(.*?);#', "#flashvars[^>]+file=(/uploads/[^'\"]+)#", "#<embed[^>]+src=['\"](.*?)['\"]#"], 0];
+  $patterns_in_page['name'       ] = ['#"og:title"[^>]+content="(.*?)"#', FINDMODE_UNESCAPE];
+  $patterns_in_page['name_eng'   ] = ['#"alternateName":"(.*?)"#'       , FINDMODE_UNESCAPE];
+  $patterns_in_page['link'       ] = '#(<div[^>]+id="yohoho".*?</div>)#s';
   $patterns_in_page['year'       ] = '#lbl">Год:.*?(\d{4})#';
-  $patterns_in_page['kpid'       ] = '#id2:(\d+)#';
+  $patterns_in_page['kpid'       ] = '#kinopoiskID[:=\s"\']+(\d+)#i';
   $patterns_in_page['country'    ] = '#(<a[^>]+/country/.*?)</div>#s';
   $patterns_in_page['category'   ] = ['#argcat".*?(<a.*?)</div>#s'           , FINDMODE_COMMALINKS];
   $patterns_in_page['director'   ] = ['#lbl">Режиссёр:</span>(.*?)</div>#s'  , FINDMODE_COMMALINKS];
@@ -137,9 +139,73 @@ function ScanPage($f3, $page=1, $last_id=0) {
     // searching field values in the loaded page
     foreach ($patterns_in_page as $key => $p) $params[$key] = FindField($p, $page);
 
+    // hdkinoteatr parsing -----------------------------------
+    $yohohoVals = RegexValue('#(<div[^>]+id="yohoho".*?</div>)#s', $page);
+    $kpID     = RegexValue('#data-kinopoisk="(.*?)"#', $yohohoVals);
+    $imdb     = RegexValue('#data-imdb="(.*?)"#'     , $yohohoVals);
+    $collaps  = RegexValue('#data-collaps="(.*?)"#'  , $yohohoVals);
+    $hdvb     = RegexValue('#data-hdvb="(.*?)"#'     , $yohohoVals);
+    $videocdn = RegexValue('#data-videocdn="(.*?)"#' , $yohohoVals);
+    if (!$kpID) $kpID = $params["kpid"];
+    $post = "videocdn=$videocdn&hdvb=$hdvb&collaps=$collaps&kinopoisk=$kpID&imdb=$imdb";
+    $result = file_get_contents("https://ahoy.yohoho.online/", false, stream_context_create(array(
+      "http" => array(
+        "method"  => "POST",
+        "header"  => "content-type: application/x-www-form-urlencoded\r\n".
+                     "origin: http://www.hdkinoteatr.com\r\n".
+                     "referer: http://www.hdkinoteatr.com/\r\n".
+                     "user-agent: Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904.108 Safari/537.36\r\n",
+        "content" => $post)
+        )));
+
+
+    if (isset($_GET["testyohoho"])) die($result);
+
+
+    $videoData = json_decode($result);
+    $linksData = array();
+    if (!$videoData) {
+      var_dump($http_response_header);
+      die("Request to ahoy.yohoho.online is failed. POST parameters: ".$post);
+    }
+    //var_dump($videoData);
+    foreach($videoData as $key => $r) {
+      $res = (array)$r;
+      if (!empty($res)) {
+        if (substr($res["iframe"], 0, 2)=="//") $res["iframe"] = "http:".$res["iframe"];
+        $linksData[$key] = $res;
+      }
+    }
+
+    $apiKinoId = RegexValue('#apikino.club/autoreplace/[^"/]+id=(\d+)#', $page);
+    if ($apiKinoId) {
+      $apiKinoData = file_get_contents("https://apikino.club/autoreplace-load/?id=$apiKinoId&hostname=www.hdkinoteatr.com&href=$page_url&kinopoiskId=$kpID");
+      $apiKino = json_decode($apiKinoData);
+      if ($apiKino->video_id > 0) {
+        $videoLink = 'https://pleeras.club/embed/'.$apiKino->parent_video_hash.'/e/'.$apiKino->video_hash.'/?sid='.$apiKino->site_id;
+        $linksData["ONIK"] = array("iframe"=>$videoLink, "translate"=>"", "quality"=>"");
+      }
+    }
+    
+    if (!isset($linksData["trailer"])) {
+      $trailerHtml = RegexValue('#(<div[^>]+id="trailer".*?</div>)#s', $page);
+      $trailerLink = RegexValue('#<iframe[^>]+src="(.*?)"#', $trailerHtml);
+      if ($trailerLink) {
+        $linksData["trailer"] = array("iframe"=>$trailerLink, "translate"=>"", "quality"=>"");
+      }
+    }
+
+    //var_dump($linksData);
+    //exit();
+
+    if (!empty($linksData)) $params['link'] = json_encode($linksData, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+
+    // --------------------------------------------------------
+
     if (!$params['link'])  {
       if (preg_match($pattern_skip_if_no_link, $page, $m)) continue;
-      ErrorExit('Regex pattern for search are `link` in blocks nothing found. Need update the php script. '.$page_url, true);
+      continue;
+      //ErrorExit('Regex pattern for search are `link` in blocks nothing found. Need update the php script. '.$page_url, true);
     }
     if (!$params['id'  ]) ErrorExit('Regex pattern for search are `id` nothing found. Need update the php script. '  .$page_url, true);
     if (!$params['name']) ErrorExit('Regex pattern for search are `name` nothing found. Need update the php script. '.$page_url, true);
@@ -158,21 +224,6 @@ function ScanPage($f3, $page=1, $last_id=0) {
     $params['rating_kp_votes'  ] = (int)$params['rating_kp_votes'];
     $params['rating_imdb_votes'] = (int)$params['rating_imdb_votes'];
     $params['isserial'         ] = (int)$params['isserial'];
-
-    // hdkinoteatr parsing -----------------------------------
-    $translates_count = substr_count($params['link'], '"file":');
-    if ($translates_count==1) {
-      if (!$params['translation']) 
-        $params['translation'] = RegexValue('#"comment":\s*"(.*?)"#', $params['link']);
-      $params['link'] = RegexValue('#"file":\s*"(.*?)"#', $params['link']);
-    }
-
-    if (preg_match_all('#oid=[\w-]+&id=[\w-]+&hash=\w+#', $params['link'], $matches)) {
-      foreach ($matches[0] as $m) {
-        $params['link'] = str_replace($m, DecodeHDkinotatrVKlink($m, $page), $params['link']);
-      }
-    }
-    // --------------------------------------------------------
 
     // Remove years from title
     if (preg_match('#\([\d-]{4,}\)#', $params['name'], $m))
@@ -247,6 +298,7 @@ function CheckUpdates($f3) {
 
 ///////////////////////////////////////////////////////////////////////////////
 function GetVideos($f3) {
+  header("Content-Type: application/json");
   CheckUpdates($f3);
   
   $where  = array();
@@ -293,10 +345,17 @@ function GetVideos($f3) {
   $start     = abs((int)$start);
   $limit     = abs((int)$limit);
   $id        = abs((int)$id   );
-  $kpid      = abs((int)$kpid );
+  //$kpid      = abs((int)$kpid );
   $category_excl = "";
   $country_excl  = "";
 
+  if ($kpid) {
+    $arr = array();
+    foreach(explode(',', $kpid) as &$val) {
+        $arr[] = abs((int)$val); 
+    }
+    $kpid = implode(',', $arr);
+  }
   if ($category) {
     $arr = explode(',', $category);
     $arr_cat_excl = array();
@@ -343,6 +402,7 @@ function GetVideos($f3) {
   }
 
   $sql = "SELECT v.*, " .
+    "(SELECT GROUP_CONCAT(t.name) FROM video_tags       AS vt LEFT JOIN tags       AS t ON t.id = vt.tag      WHERE vt.video=v.id) AS tags, ".
     "(SELECT GROUP_CONCAT(n.name) FROM video_countries  AS vn LEFT JOIN countries  AS n ON n.id = vn.country  WHERE vn.video=v.id) AS country, ".
     "(SELECT GROUP_CONCAT(c.name) FROM video_categories AS vc LEFT JOIN categories AS c ON c.id = vc.category WHERE vc.video=v.id) AS genre ".
     "FROM videos AS v";
@@ -368,7 +428,7 @@ function GetVideos($f3) {
     $sql .= " INNER JOIN video_countries  AS q ON q.video=v.id";
   }
   
-  if ($tag      ) { $params[':tag'      ]=$tag      ; $where[]="y.tag IN (:tag)"          ; $sql .= " INNER JOIN video_tags       AS y ON y.video=v.id"; }
+  if ($tag      ) { $where[]="y.tag IN (".$tag.")"; $sql .= " INNER JOIN video_tags AS y ON y.video=v.id"; }
   if ($year     ) { $params[':year'     ]=$year     ; $where[]="year=:year"; }
   if ($serials<2) { $params[':serials'  ]=$serials  ; $where[]="isserial=:serials"; }
   if ($rating_im) { $params[':rating_im']=$rating_im; $where[]="rating_imdb>=:rating_im"; }
@@ -392,17 +452,29 @@ function GetVideos($f3) {
   }
 
   if     ($id    ) { $params[':id'  ]=$id        ; $where[]="v.id=:id"; }
-  elseif ($kpid  ) { $params[':kpid']=$kpid      ; $where[]="v.kpid=:kpid"; }
+  elseif ($kpid  ) { $where[]="v.kpid IN (".$kpid.")"; }
   elseif ($letter) { $params[':name']=$letter."%"; $where[]="v.name LIKE :name"; }
-  elseif ($q     ) { $params[':name']="%$q%"     ; $where[]="v.name LIKE :name OR v.name_eng LIKE :name"; }
+  elseif ($q) {
+    $params[':name' ] = "%$q%";
+    $params[':nameX'] = "$q";
+    $params[':nameB'] = "$q%";
+    $where[] = "v.name LIKE :name OR v.name_eng LIKE :name";
+    $order[] = "priority DESC";
+    $sql = str_replace("SELECT v.*,", "SELECT v.*, case when v.name like :nameX then 4 when v.name_eng like :nameX then 3 when v.name like :nameB then 2 when v.name_eng like :nameB then 1 else 0 end as priority, ", $sql);
+  }
+  //elseif ($q     ) { $params[':name']="%$q%"     ; $where[]="v.name LIKE :name OR v.name_eng LIKE :name"; }
+
+
 
   if (count($where)>0) $sql .= " WHERE ".implode(' AND ', $where);
+  $sql .= " GROUP BY v.id";
   if (count($order)>0) $sql .= " ORDER BY ".implode(', ', $order);
 
   // default values
   if (!strpos($sql, 'ORDER' )) $sql .= " ORDER BY date DESC";
   if (!strpos($sql, 'LIMIT' )) $sql .= " LIMIT $start,$limit";
 
+  //var_dump($sql);var_dump($where);var_dump($category);die();
   $result = $db->exec($sql, $params);
 
   if ($human_read)
@@ -416,7 +488,7 @@ function GetVideos($f3) {
 
 ///////////////////////////////////////////////////////////////////////////////
 function ListTable($f3, $table_name) {
-  
+  header("Content-Type: application/json");
   $no_cache   = isset($_REQUEST['_']) || isset($_REQUEST['rnd']);
   $cache_name = $table_name."_".md5($_SERVER["QUERY_STRING"]);
   if (!$no_cache && LoadCache($f3, $cache_name)) return;
@@ -490,7 +562,7 @@ function FindEpisodes($json, $url) {
     $episode = $e;
     $name = sprintf("$frmt серия", $episode);
     $link = "$url?season=$season&episode=$episode";
-    if (subs)
+    if ($subs)
       $result[] = ["comment"=>$name, "file"=>$link, "subs"=>true];
     else
       $result[] = ["comment"=>$name, "file"=>$link];
@@ -500,6 +572,12 @@ function FindEpisodes($json, $url) {
 
 ///////////////////////////////////////////////////////////////////////////////
 function GetSeries($f3) {
+  header("Content-Type: application/json");
+  die("");
+  //$url = 'https://php-coder.cx.ua'.$_SERVER["REQUEST_URI"];
+
+  //$f3->reroute($url);
+  //exit();  
 
   // parameters
   $type    = isset($_REQUEST['t'      ]) ?      $_REQUEST['t'      ] : "serial"; // video | serial
@@ -518,6 +596,7 @@ function GetSeries($f3) {
 
   $url  = "http://moonwalk.cc/$type/$hash/iframe";
   $html = LoadPage($url);
+  if (!$html) ErrorExit("Error loading page.");
 
   if (isset($_REQUEST['html'])) die($html);
 
@@ -864,12 +943,13 @@ function RegexValue($pattern, $text, $group_num=1, $default="", $check=false) {
 
 ///////////////////////////////////////////////////////////////////////////////
 function LoadPage($url) {
-  $headers = "Accept-Encoding: gzip, deflate\r\n" .
+  $headers = "Accept-Encoding: deflate\r\n" .
              "Accept: application/json, text/javascript, */*; q=0.01\r\n" .
              "Referer: http://www.hdkinoteatr.com/\r\n" .
              "User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36\r\n";
   $options = array('http'=>array('method'=>'GET', 'header'=>$headers, 'timeout'=>14));
   $page    = @file_get_contents($url, false, stream_context_create($options));
+  return $page;
   if ($http_response_header) {
     foreach($http_response_header as $c => $h) {
       if (stristr($h, 'content-encoding') and stristr($h, 'gzip')) {
