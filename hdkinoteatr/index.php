@@ -158,9 +158,7 @@ function ScanPage($f3, $page=1, $last_id=0) {
         "content" => $post)
         )));
 
-
     if (isset($_GET["testyohoho"])) die($result);
-
 
     $videoData = json_decode($result);
     $linksData = array();
@@ -168,7 +166,7 @@ function ScanPage($f3, $page=1, $last_id=0) {
       var_dump($http_response_header);
       die("Request to ahoy.yohoho.online is failed. POST parameters: ".$post);
     }
-    //var_dump($videoData);
+
     foreach($videoData as $key => $r) {
       $res = (array)$r;
       if (!empty($res)) {
@@ -194,9 +192,6 @@ function ScanPage($f3, $page=1, $last_id=0) {
         $linksData["trailer"] = array("iframe"=>$trailerLink, "translate"=>"", "quality"=>"");
       }
     }
-
-    //var_dump($linksData);
-    //exit();
 
     if (!empty($linksData)) $params['link'] = json_encode($linksData, JSON_NUMERIC_CHECK|JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
 
@@ -455,16 +450,21 @@ function GetVideos($f3) {
   elseif ($kpid  ) { $where[]="v.kpid IN (".$kpid.")"; }
   elseif ($letter) { $params[':name']=$letter."%"; $where[]="v.name LIKE :name"; }
   elseif ($q) {
-    $params[':name' ] = "%$q%";
-    $params[':nameX'] = "$q";
-    $params[':nameB'] = "$q%";
-    $where[] = "v.name LIKE :name OR v.name_eng LIKE :name";
+    preg_match_all("/\w+/u", $q, $m);
+    $words = "%".implode("%", $m[0])."%";
+
+    $sqlpriority = "case ";
+    $params[':nameX'] = "$q"  ; $sqlpriority .= "when v.name like :nameX then 5 when v.name_eng like :nameX then 5 ";
+    $params[':nameB'] = "$q%" ; $sqlpriority .= "when v.name like :nameB then 4 when v.name_eng like :nameB then 4 ";
+    $params[':name' ] = "%$q%"; $sqlpriority .= "when v.name like :name  then 3 when v.name_eng like :name  then 3 ";
+    $params[":words"] = $words; $sqlpriority .= "when v.name like :words then 2 when v.name_eng like :words then 2 ";
+    $sqlpriority .= "else 0 end as priority, ";
+
+    $where[] = "v.name LIKE :words OR v.name_eng LIKE :words";
     $order[] = "priority DESC";
-    $sql = str_replace("SELECT v.*,", "SELECT v.*, case when v.name like :nameX then 4 when v.name_eng like :nameX then 3 when v.name like :nameB then 2 when v.name_eng like :nameB then 1 else 0 end as priority, ", $sql);
+    
+    $sql = str_replace("SELECT v.*,", "SELECT v.*, $sqlpriority", $sql);
   }
-  //elseif ($q     ) { $params[':name']="%$q%"     ; $where[]="v.name LIKE :name OR v.name_eng LIKE :name"; }
-
-
 
   if (count($where)>0) $sql .= " WHERE ".implode(' AND ', $where);
   $sql .= " GROUP BY v.id";
@@ -474,7 +474,6 @@ function GetVideos($f3) {
   if (!strpos($sql, 'ORDER' )) $sql .= " ORDER BY date DESC";
   if (!strpos($sql, 'LIMIT' )) $sql .= " LIMIT $start,$limit";
 
-  //var_dump($sql);var_dump($where);var_dump($category);die();
   $result = $db->exec($sql, $params);
 
   if ($human_read)
